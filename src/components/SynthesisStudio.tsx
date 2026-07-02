@@ -339,21 +339,21 @@ export default function SynthesisStudio() {
                       <Label>גובה צליל (Pitch)</Label>
                       <span className="text-xs text-muted-foreground">{pitch[0]}%</span>
                     </div>
-                    <Slider value={pitch} onValueChange={setPitch} max={100} step={1} />
+                    <Slider value={pitch} onValueChange={setPitch} max={100} step={1} aria-label="גובה צליל (Pitch)" />
                   </div>
                   <div className="space-y-3">
                     <div className="flex justify-between">
                       <Label>מהירות</Label>
                       <span className="text-xs text-muted-foreground">{speed[0]}%</span>
                     </div>
-                    <Slider value={speed} onValueChange={setSpeed} max={100} step={1} />
+                    <Slider value={speed} onValueChange={setSpeed} max={100} step={1} aria-label="מהירות דיבור (Tempo)" />
                   </div>
                   <div className="space-y-3">
                     <div className="flex justify-between">
                       <Label>יציבות</Label>
                       <span className="text-xs text-muted-foreground">{stability[0]}%</span>
                     </div>
-                    <Slider value={stability} onValueChange={setStability} max={100} step={1} />
+                    <Slider value={stability} onValueChange={setStability} max={100} step={1} aria-label="יציבות קול (Stability)" />
                   </div>
                   <div className="space-y-3 pt-2 border-t border-border">
                     <div className="flex justify-between">
@@ -377,14 +377,14 @@ export default function SynthesisStudio() {
                       <Label>שונות קצב דיבור (Rate Variability)</Label>
                       <span className="text-xs text-muted-foreground">{rateVariability[0]}%</span>
                     </div>
-                    <Slider value={rateVariability} onValueChange={setRateVariability} max={100} step={1} />
+                    <Slider value={rateVariability} onValueChange={setRateVariability} max={100} step={1} aria-label="שונות קצב דיבור (Rate Variability)" />
                   </div>
                   <div className="space-y-3">
                     <div className="flex justify-between">
                       <Label>עוצמת מבטא (Accent Intensity)</Label>
                       <span className="text-xs text-muted-foreground">{accentIntensity[0]}%</span>
                     </div>
-                    <Slider value={accentIntensity} onValueChange={setAccentIntensity} max={100} step={1} />
+                    <Slider value={accentIntensity} onValueChange={setAccentIntensity} max={100} step={1} aria-label="עוצמת מבטא (Accent Intensity)" />
                   </div>
                 </div>
               </CardContent>
@@ -426,7 +426,7 @@ export default function SynthesisStudio() {
                   התור ריק.
                 </div>
               ) : (
-                <div className="divide-y divide-border">
+                <div className="divide-y divide-border" aria-live="polite">
                   {queue.map(item => (
                     <div key={item.id} className="p-4 space-y-2">
                       <div className="flex items-start justify-between">
@@ -503,6 +503,7 @@ export default function SynthesisStudio() {
                                    key={star}
                                    onClick={() => handleRate(item.id, star)}
                                    className="focus:outline-none transition-colors hover:scale-110"
+                                   aria-label={`דרג ${star} כוכבים`}
                                  >
                                    <Star 
                                      className={`w-3.5 h-3.5 ${item.rating && star <= item.rating ? 'fill-yellow-500 text-yellow-500' : 'text-muted-foreground hover:text-yellow-500/50'}`} 

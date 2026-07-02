@@ -18,6 +18,7 @@ export interface VoiceProfile {
   baseStyleId?: string;
   createdAt: number;
   tags?: string[];
+  elevenLabsVoiceId?: string;
   // Multi-parameter voice characterization:
   gender?: 'male' | 'female' | 'neutral';
   ageGroup?: 'young' | 'mature' | 'elder';

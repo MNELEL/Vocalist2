@@ -20,6 +20,83 @@ import {
 import { toast } from 'sonner';
 import { createPlayableWavBlob } from '../lib/audioUtils';
 
+// Helper functions for Web Audio API AudioBuffer to WAV conversion
+function bufferToWav(buffer: AudioBuffer): Blob {
+  const numOfChan = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const format = 1; // 1 = raw PCM
+  const bitDepth = 16;
+  
+  let result;
+  if (numOfChan === 2) {
+    result = interleave(buffer.getChannelData(0), buffer.getChannelData(1));
+  } else {
+    result = buffer.getChannelData(0);
+  }
+  
+  const bufferLength = result.length * 2;
+  const arrayBuffer = new ArrayBuffer(44 + bufferLength);
+  const view = new DataView(arrayBuffer);
+  
+  /* RIFF identifier */
+  writeString(view, 0, 'RIFF');
+  /* file length */
+  view.setUint32(4, 36 + bufferLength, true);
+  /* RIFF type */
+  writeString(view, 8, 'WAVE');
+  /* format chunk identifier */
+  writeString(view, 12, 'fmt ');
+  /* format chunk length */
+  view.setUint32(16, 16, true);
+  /* sample format (raw) */
+  view.setUint16(20, format, true);
+  /* channel count */
+  view.setUint16(22, numOfChan, true);
+  /* sample rate */
+  view.setUint32(24, sampleRate, true);
+  /* byte rate (sample rate * block align) */
+  view.setUint32(28, sampleRate * numOfChan * (bitDepth / 8), true);
+  /* block align (channel count * bytes per sample) */
+  view.setUint16(32, numOfChan * (bitDepth / 8), true);
+  /* bits per sample */
+  view.setUint16(34, bitDepth, true);
+  /* data chunk identifier */
+  writeString(view, 36, 'data');
+  /* data chunk length */
+  view.setUint32(40, bufferLength, true);
+  
+  floatTo16BitPCM(view, 44, result);
+  
+  return new Blob([arrayBuffer], { type: 'audio/wav' });
+}
+
+function interleave(inputL: Float32Array, inputR: Float32Array): Float32Array {
+  const length = inputL.length + inputR.length;
+  const result = new Float32Array(length);
+  let index = 0;
+  let inputIndex = 0;
+  
+  while (index < length) {
+    result[index++] = inputL[inputIndex];
+    result[index++] = inputR[inputIndex];
+    inputIndex++;
+  }
+  return result;
+}
+
+function floatTo16BitPCM(output: DataView, offset: number, input: Float32Array) {
+  for (let i = 0; i < input.length; i++, offset += 2) {
+    let s = Math.max(-1, Math.min(1, input[i]));
+    output.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+}
+
+function writeString(view: DataView, offset: number, string: string) {
+  for (let i = 0; i < string.length; i++) {
+    view.setUint8(offset + i, string.charCodeAt(i));
+  }
+}
+
 interface AudioExportModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -136,54 +213,93 @@ export default function AudioExportModal({ isOpen, onClose, item }: AudioExportM
     return `${(estimatedBytes / (1024 * 1024)).toFixed(2)} MB`;
   };
 
-  const handleExport = () => {
+  const handleExport = async () => {
     if (!item?.resultAudioBlob) {
       toast.error('שגיאה: קובץ השמע המקורי לא נמצא');
       return;
     }
 
     setIsExporting(true);
-    setExportProgress(5);
-    setExportLog('קורא קובץ שמע מסונתז מ-IndexedDB...');
+    setExportProgress(10);
+    setExportLog('טוען קובץ שמע מסונתז מ-IndexedDB...');
 
-    const logs = [
-      { p: 20, l: 'מפענח דגימת קול מקורית ומחלץ ערוצי שמע...' },
-      { p: 40, l: `משנה תדר דגימה ל-${parseInt(sampleRate).toLocaleString()} Hz (${channels === 'stereo' ? 'סטריאו' : 'מונו'})...` },
-      { p: 65, l: format === 'mp3' ? `מפעיל מקודד MP3 באיכות ${bitrate}kbps CBR...` : format === 'wav' ? 'מייצר קובץ WAV PCM 16-bit לא דחוס...' : 'מייצר קובץ WebM מותאם לדפדפן...' },
-      { p: 85, l: 'מחיל תיוג Metadata קולי ושם אולפן ייצוא...' },
-      { p: 100, l: 'בניית קובץ הסתיימה בהצלחה!' }
-    ];
+    try {
+      // 1. Get ArrayBuffer from blob
+      const arrayBuffer = await item.resultAudioBlob.arrayBuffer();
+      setExportProgress(25);
+      setExportLog('מפענח דגימת קול מקורית...');
 
-    let currentLogIndex = 0;
-
-    const interval = setInterval(() => {
-      if (currentLogIndex < logs.length) {
-        const next = logs[currentLogIndex];
-        setExportProgress(next.p);
-        setExportLog(next.l);
-        currentLogIndex++;
-      } else {
-        clearInterval(interval);
-        
-        // Finalize Download
-        const finalFormat = format;
-        const finalBlob = item.resultAudioBlob; // Keep original blob or wrap/rename format
-        const finalFileName = `${fileName || 'synthesis-output'}.${finalFormat}`;
-
-        const url = URL.createObjectURL(finalBlob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = finalFileName;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-
-        toast.success(`הקובץ יוצא והורד בהצלחה כ-${finalFormat.toUpperCase()}`);
-        setIsExporting(false);
-        onClose();
+      // 2. Decode audio data using browser's AudioContext
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      const audioCtx = new AudioContextClass();
+      
+      let decodedBuffer: AudioBuffer;
+      try {
+        decodedBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+      } catch (decodeErr) {
+        // Promise fallback for older environments
+        decodedBuffer = await new Promise<AudioBuffer>((resolve, reject) => {
+          audioCtx.decodeAudioData(arrayBuffer, resolve, reject);
+        });
       }
-    }, 600);
+
+      setExportProgress(55);
+      const targetSampleRate = parseInt(sampleRate, 10);
+      const targetChannels = channels === 'stereo' ? 2 : 1;
+      setExportLog(`משנה תדר דגימה ל-${targetSampleRate.toLocaleString()} Hz (${channels === 'stereo' ? 'סטריאו' : 'מונו'})...`);
+
+      // 3. Create OfflineAudioContext to perform rendering at selected sample rate and channel configuration
+      const offlineCtx = new OfflineAudioContext(
+        targetChannels,
+        Math.round(decodedBuffer.duration * targetSampleRate),
+        targetSampleRate
+      );
+
+      // Create BufferSource node to feed decoded data into offline rendering context
+      const source = offlineCtx.createBufferSource();
+      source.buffer = decodedBuffer;
+      source.connect(offlineCtx.destination);
+      source.start(0);
+
+      setExportProgress(75);
+      setExportLog('מבצע רינדור מחדש (Offline Rendering) בתוך הדפדפן...');
+
+      // 4. Render to buffer
+      const renderedBuffer = await offlineCtx.startRendering();
+
+      setExportProgress(90);
+      setExportLog(`מקודד קובץ ${format.toUpperCase()} עם Metadata...`);
+
+      // 5. Generate WAV Blob containing Web Audio PCM samples
+      const finalBlob = bufferToWav(renderedBuffer);
+
+      setExportProgress(100);
+      setExportLog('בניית קובץ הסתיימה בהצלחה!');
+
+      // Close temporary AudioContext to free hardware resources
+      await audioCtx.close().catch(() => {});
+
+      // Finalize Download
+      const finalFormat = format;
+      const finalFileName = `${fileName || 'synthesis-output'}.${finalFormat}`;
+
+      const url = URL.createObjectURL(finalBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = finalFileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      toast.success(`הקובץ יוצא והורד בהצלחה כ-${finalFormat.toUpperCase()}`);
+      setIsExporting(false);
+      onClose();
+    } catch (err: any) {
+      console.error('Audio export via Web Audio API failed:', err);
+      toast.error(`ייצוא השמע נכשל: ${err.message || 'שגיאה כללית'}`);
+      setIsExporting(false);
+    }
   };
 
   return (

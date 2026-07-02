@@ -319,13 +319,117 @@ export default function ProfileGallery() {
   const [editResonance, setEditResonance] = useState<'chest' | 'head' | 'nasal'>('chest');
   const [editEmotion, setEditEmotion] = useState<'calm' | 'excited' | 'empathic' | 'neutral' | 'assertive'>('neutral');
 
+  const [isCreatingProfile, setIsCreatingProfile] = useState(false);
+  const [syncingProfileId, setSyncingProfileId] = useState<string | null>(null);
+
+  const blobToBase64 = (blob: Blob): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        if (typeof reader.result === 'string') {
+          const base64String = reader.result.split(',')[1];
+          resolve(base64String);
+        } else {
+          reject(new Error('Failed to convert blob to base64'));
+        }
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  };
+
+  const syncProfileToElevenLabs = async (profile: VoiceProfile) => {
+    if (!profile.sourceAudioId) {
+      toast.error('לא נמצאה הקלטת מקור לפרופיל זה. לא ניתן לסנכרן ל-ElevenLabs.');
+      return;
+    }
+    setSyncingProfileId(profile.id);
+    try {
+      const draft = await db.audioDrafts.get(profile.sourceAudioId);
+      if (!draft || !draft.blob) {
+        toast.error('הקלטת המקור לא נמצאה בבסיס הנתונים המקומי.');
+        return;
+      }
+      
+      const base64Audio = await blobToBase64(draft.blob);
+      const response = await fetch('/api/voices/add', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          name: profile.name,
+          description: profile.description,
+          base64Audio,
+          mimeType: draft.blob.type
+        })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data && data.voice_id) {
+          await db.voiceProfiles.update(profile.id, {
+            elevenLabsVoiceId: data.voice_id
+          });
+          toast.success('פרופיל הקול סונכרן ונוצר בהצלחה ב-ElevenLabs!');
+        } else {
+          toast.error('השירות החזיר תגובה לא תקינה');
+        }
+      } else {
+        const errData = await response.json().catch(() => ({}));
+        toast.error(`סנכרון ל-ElevenLabs נכשל: ${errData.error || 'שגיאה כללית'}`);
+      }
+    } catch (err: any) {
+      console.error(err);
+      toast.error(`שגיאה בחיבור לשרת: ${err.message || 'שגיאת רשת'}`);
+    } finally {
+      setSyncingProfileId(null);
+    }
+  };
+
   const createProfile = async () => {
     if (!newProfileName.trim() || !selectedDraftId) {
       toast.error('אנא ספק שם ובחר טיוטת שמע כרפרנס.');
       return;
     }
     
+    setIsCreatingProfile(true);
+    let elevenLabsVoiceId = undefined;
+    
     try {
+      const draft = await db.audioDrafts.get(selectedDraftId);
+      if (draft && draft.blob) {
+        try {
+          const base64Audio = await blobToBase64(draft.blob);
+          const response = await fetch('/api/voices/add', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              name: newProfileName,
+              description: newProfileDesc,
+              base64Audio,
+              mimeType: draft.blob.type
+            })
+          });
+          
+          if (response.ok) {
+            const data = await response.json();
+            if (data && data.voice_id) {
+              elevenLabsVoiceId = data.voice_id;
+              toast.success('הקול סונכרן ונוצר בהצלחה ב-ElevenLabs!');
+            }
+          } else {
+            const errData = await response.json().catch(() => ({}));
+            toast.warning(`לא ניתן היה לרשום את הקול ב-ElevenLabs: ${errData.error || 'שגיאה כללית'}. הפרופיל ייווצר באופן מקומי בלבד.`);
+          }
+        } catch (err) {
+          console.warn('ElevenLabs API registration failed, falling back to local-only:', err);
+          toast.warning('לא מוגדר מפתח ElevenLabs או שישנה בעיית רשת. הפרופיל נשמר באופן מקומי בלבד.');
+        }
+      }
+
       const id = crypto.randomUUID();
       await db.voiceProfiles.add({
         id,
@@ -341,7 +445,8 @@ export default function ProfileGallery() {
         accent,
         resonance,
         emotion,
-        tags: newProfileTags
+        tags: newProfileTags,
+        elevenLabsVoiceId
       });
       toast.success('פרופיל הקול נוצר בהצלחה');
       setIsDialogOpen(false);
@@ -362,6 +467,8 @@ export default function ProfileGallery() {
       setNewProfileTagInput('');
     } catch (error) {
       toast.error('יצירת הפרופיל נכשלה');
+    } finally {
+      setIsCreatingProfile(false);
     }
   };
 
@@ -806,6 +913,7 @@ export default function ProfileGallery() {
                     step={1}
                     onValueChange={setPitch}
                     className="py-1"
+                    aria-label="גובה צליל (Pitch)"
                   />
                   <div className="flex justify-between text-[9px] text-muted-foreground px-1">
                     <span>עמוק (בס)</span>
@@ -826,6 +934,7 @@ export default function ProfileGallery() {
                     step={1}
                     onValueChange={setSpeed}
                     className="py-1"
+                    aria-label="מהירות דיבור (Tempo)"
                   />
                   <div className="flex justify-between text-[9px] text-muted-foreground px-1">
                     <span>מתון / איטי</span>
@@ -838,8 +947,10 @@ export default function ProfileGallery() {
 
             </div>
             <DialogFooter className="gap-2">
-              <Button variant="outline" size="sm" onClick={() => setIsDialogOpen(false)}>ביטול</Button>
-              <Button size="sm" className="bg-indigo-600 hover:bg-indigo-500 text-white" onClick={createProfile}>צור פרופיל</Button>
+              <Button variant="outline" size="sm" onClick={() => setIsDialogOpen(false)} disabled={isCreatingProfile}>ביטול</Button>
+              <Button size="sm" className="bg-indigo-600 hover:bg-indigo-500 text-white" onClick={createProfile} disabled={isCreatingProfile}>
+                {isCreatingProfile ? 'מבצע שיבוט ויוצר...' : 'צור פרופיל'}
+              </Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
@@ -1112,6 +1223,37 @@ export default function ProfileGallery() {
                     </div>
                   </div>
 
+                  {/* ElevenLabs Voice Sync Status */}
+                  <div className="pt-2 border-t border-indigo-500/10 flex justify-between items-center text-[11px]">
+                    <span className="text-muted-foreground font-semibold">סנכרון ElevenLabs:</span>
+                    {profile.elevenLabsVoiceId ? (
+                      <Badge variant="secondary" className="bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/20 font-mono text-[9px] border border-emerald-500/20 gap-1 py-0.5">
+                        <Check className="w-3 h-3 text-emerald-400" />
+                        סונכרן ({profile.elevenLabsVoiceId.substring(0, 8)}...)
+                      </Badge>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 px-2 text-[10px] text-indigo-400 hover:text-indigo-300 hover:bg-indigo-500/10 gap-1 border border-indigo-500/20"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          syncProfileToElevenLabs(profile);
+                        }}
+                        disabled={syncingProfileId === profile.id}
+                      >
+                        {syncingProfileId === profile.id ? (
+                          'מסנכרן...'
+                        ) : (
+                          <>
+                            <Sparkles className="w-3 h-3 text-indigo-400" />
+                            סנכרן כעת
+                          </>
+                        )}
+                      </Button>
+                    )}
+                  </div>
+
                 </CardContent>
 
                 <CardFooter className="pt-2 pb-4 px-4 flex gap-2">
@@ -1375,6 +1517,7 @@ export default function ProfileGallery() {
                   step={1}
                   onValueChange={setEditPitch}
                   className="py-1"
+                  aria-label="גובה צליל (Pitch)"
                 />
               </div>
 
@@ -1390,6 +1533,7 @@ export default function ProfileGallery() {
                   step={1}
                   onValueChange={setEditSpeed}
                   className="py-1"
+                  aria-label="מהירות דיבור (Tempo)"
                 />
               </div>
 

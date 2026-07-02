@@ -138,6 +138,27 @@ self.addEventListener('message', (event) => {
   }
 });
 
+function getVoiceProfileFromDB(profileId) {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('VoiceAppDB');
+    request.onsuccess = (event) => {
+      const db = event.target.result;
+      try {
+        const transaction = db.transaction(['voiceProfiles'], 'readonly');
+        const store = transaction.objectStore('voiceProfiles');
+        const getRequest = store.get(profileId);
+        getRequest.onsuccess = () => {
+          resolve(getRequest.result || null);
+        };
+        getRequest.onerror = (err) => reject(err);
+      } catch (err) {
+        resolve(null);
+      }
+    };
+    request.onerror = (err) => reject(err);
+  });
+}
+
 const MAX_RETRIES = 3;
 async function performSynthesisWithRetry(queueId, payload, attempt, startTime) {
   const { text, profileId, params } = payload;
@@ -148,59 +169,96 @@ async function performSynthesisWithRetry(queueId, payload, attempt, startTime) {
     const rateVariability = params?.rateVariability || 50;
     const accentIntensity = params?.accentIntensity || 50;
 
-    // Simulate synthesis logic
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // Get the voice profile from IndexedDB to see if we have an ElevenLabs voice ID
+    const profile = await getVoiceProfileFromDB(profileId).catch(() => null);
     
-    // Simulate random failure for testing (if needed, but for now just proceed)
-    // if (Math.random() < 0.5) throw new Error('Simulated synthesis failure');
+    let resultBlob = null;
+    let usedRealAPI = false;
+
+    if (profile && profile.elevenLabsVoiceId) {
+      try {
+        const response = await fetch('/api/synthesize', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            voiceId: profile.elevenLabsVoiceId,
+            text,
+            params: {
+              pitch,
+              stability,
+              emotionalTone,
+              rateVariability,
+              accentIntensity
+            }
+          })
+        });
+
+        if (response.ok) {
+          resultBlob = await response.blob();
+          usedRealAPI = true;
+        } else {
+          const errData = await response.json().catch(() => ({ error: 'שגיאת רשת בסינתזה' }));
+          console.warn('ElevenLabs API failed, falling back to local simulation:', errData.error);
+        }
+      } catch (err) {
+        console.warn('Network error calling ElevenLabs API, falling back to local simulation:', err);
+      }
+    }
+
+    if (!usedRealAPI) {
+      // Simulate synthesis logic
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      let toneMultiplier = 1.0;
+      if (emotionalTone === 'happy' || emotionalTone === 'excited') toneMultiplier = 1.2;
+      if (emotionalTone === 'sad') toneMultiplier = 0.8;
+      if (emotionalTone === 'angry') toneMultiplier = 0.9;
+      
+      const durationMultiplier = 1.0 + (rateVariability - 50) / 100;
+      const accentMod = (accentIntensity * 0.5);
+      
+      const baseFreq = (220 + (pitch * 3) + (stability * 0.5) + accentMod) * toneMultiplier;
+      const durationSeconds = 1.8 * durationMultiplier;
+      const sampleRate = 11025;
+      
+      // Inline simplified playable wav generation for SW
+      const numSamples = Math.floor(sampleRate * durationSeconds);
+      const subchunk2Size = numSamples * 2;
+      const buffer = new ArrayBuffer(44 + subchunk2Size);
+      const view = new DataView(buffer);
+      view.setUint32(4, 36 + subchunk2Size, true);
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      view.setUint32(40, subchunk2Size, true);
+      [0x52,0x49,0x46,0x46,0,0,0,0,0x57,0x41,0x56,0x45,0x66,0x6d,0x74,0x20].forEach((v,i) => view.setUint8(i,v));
+      [0x64,0x61,0x74,0x61].forEach((v,i) => view.setUint8(36+i,v));
+      
+      let offset = 44;
+      for (let i = 0; i < numSamples; i++) {
+        const t = i / sampleRate;
+        let sample = Math.sin(2 * Math.PI * baseFreq * t);
+        sample += 0.3 * Math.sin(2 * Math.PI * (baseFreq * 2) * t);
+        sample /= 1.3;
+        let env = 1.0;
+        if (i < 1000) env = i / 1000;
+        else if (i > numSamples - 2000) env = (numSamples - i) / 2000;
+        view.setInt16(offset, Math.floor(sample * env * 30000), true);
+        offset += 2;
+      }
+      
+      resultBlob = new Blob([buffer], { type: 'audio/wav' });
+    }
 
     const synthesisTimeMs = Date.now() - startTime;
     
-    let toneMultiplier = 1.0;
-    if (emotionalTone === 'happy' || emotionalTone === 'excited') toneMultiplier = 1.2;
-    if (emotionalTone === 'sad') toneMultiplier = 0.8;
-    if (emotionalTone === 'angry') toneMultiplier = 0.9;
-    
-    const durationMultiplier = 1.0 + (rateVariability - 50) / 100;
-    const accentMod = (accentIntensity * 0.5);
-    
-    const baseFreq = (220 + (pitch * 3) + (stability * 0.5) + accentMod) * toneMultiplier;
-    const durationSeconds = 1.8 * durationMultiplier;
-    const sampleRate = 11025;
-    
-    // Inline simplified playable wav generation for SW
-    const numSamples = Math.floor(sampleRate * durationSeconds);
-    const subchunk2Size = numSamples * 2;
-    const buffer = new ArrayBuffer(44 + subchunk2Size);
-    const view = new DataView(buffer);
-    view.setUint32(4, 36 + subchunk2Size, true);
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    view.setUint32(40, subchunk2Size, true);
-    [0x52,0x49,0x46,0x46,0,0,0,0,0x57,0x41,0x56,0x45,0x66,0x6d,0x74,0x20].forEach((v,i) => view.setUint8(i,v));
-    [0x64,0x61,0x74,0x61].forEach((v,i) => view.setUint8(36+i,v));
-    
-    let offset = 44;
-    for (let i = 0; i < numSamples; i++) {
-      const t = i / sampleRate;
-      let sample = Math.sin(2 * Math.PI * baseFreq * t);
-      sample += 0.3 * Math.sin(2 * Math.PI * (baseFreq * 2) * t);
-      sample /= 1.3;
-      let env = 1.0;
-      if (i < 1000) env = i / 1000;
-      else if (i > numSamples - 2000) env = (numSamples - i) / 2000;
-      view.setInt16(offset, Math.floor(sample * env * 30000), true);
-      offset += 2;
-    }
-    
-    const dummyBlob = new Blob([buffer], { type: 'audio/wav' });
-
-    await updateSynthesisInDB(queueId, dummyBlob, synthesisTimeMs);
+    await updateSynthesisInDB(queueId, resultBlob, synthesisTimeMs);
 
     // Notify active windows
     const clients = await self.clients.matchAll();
